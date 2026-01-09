@@ -49,10 +49,24 @@ export namespace Project {
 
     const { id, sandbox, worktree, vcs } = await iife(async () => {
       const matches = Filesystem.up({ targets: [".git"], start: directory })
-      const git = await matches.next().then((x) => x.value)
+      let git = await matches.next().then((x) => x.value)
       await matches.return()
+
       if (git) {
         let sandbox = path.dirname(git)
+
+        const gitFile = Bun.file(git);
+        if (await gitFile.exists()) {
+          const content = await gitFile.text();
+          const gitDir = content.match(/^gitdir: (.*)/)?.at(1);
+          if (gitDir) {
+            const linkedDir = path.resolve(path.dirname(git), gitDir);
+            if (existsSync(linkedDir)) {
+              log.info("followGitFile", { linkedDir })
+              git = linkedDir;
+            }
+          }
+        }
 
         const gitBinary = Bun.which("git")
 
@@ -73,21 +87,14 @@ export namespace Project {
 
         // generate id from root commit
         if (!id) {
-          const roots = await $`git rev-list --max-parents=0 --all`
+          const root = await $`git rev-list --max-parents=0 --all --max-count=1`
             .quiet()
             .nothrow()
             .cwd(sandbox)
             .text()
-            .then((x) =>
-              x
-                .split("\n")
-                .filter(Boolean)
-                .map((x) => x.trim())
-                .toSorted(),
-            )
             .catch(() => undefined)
 
-          if (!roots) {
+          if (root === undefined) {
             return {
               id: "global",
               worktree: sandbox,
@@ -96,21 +103,18 @@ export namespace Project {
             }
           }
 
-          id = roots[0]
-          if (id) {
-            void Bun.file(path.join(git, "opencode"))
-              .write(id)
-              .catch(() => undefined)
+          id = root.trim()
+          if (!id) {
+            return {
+              id: "global",
+              worktree: sandbox,
+              sandbox: sandbox,
+              vcs: "git",
+            }
           }
-        }
-
-        if (!id) {
-          return {
-            id: "global",
-            worktree: sandbox,
-            sandbox: sandbox,
-            vcs: "git",
-          }
+          void Bun.file(path.join(git, "opencode"))
+            .write(id)
+            .catch(() => undefined)
         }
 
         const top = await $`git rev-parse --show-toplevel`
@@ -168,6 +172,7 @@ export namespace Project {
         vcs: Info.shape.vcs.parse(Flag.OPENCODE_FAKE_VCS),
       }
     })
+    log.info('resolvedProject', {id, sandbox, worktree, vcs})
 
     let existing = await Storage.read<Info>(["project", id]).catch(() => undefined)
     if (!existing) {
